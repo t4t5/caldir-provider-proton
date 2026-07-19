@@ -322,6 +322,7 @@ dependencies = [
  "caldir-core",
  "chrono",
  "chrono-tz",
+ "futures",
  "hmac",
  "proton-crypto",
  "proton-crypto-account",

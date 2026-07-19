@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use caldir_core::Event;
+use futures::{StreamExt, stream};
 use proton_crypto::crypto::{
     DataEncoding, Decryptor, DecryptorSync, DetachedSignatureVariant, Encryptor, EncryptorSync,
     PGPMessage, PGPProviderSync, SessionKeyAlgorithm, Signer, SignerSync, VerifiedData, Verifier,
@@ -15,6 +16,9 @@ use crate::api::ApiClient;
 use crate::constants::PAGE_SIZE;
 use crate::keys::UnlockedAccount;
 use crate::mapping::{cards_from_event, event_from_payloads, notifications_from_event};
+
+const EVENT_WINDOW_SECONDS: i64 = 365 * 24 * 60 * 60;
+const MAX_CONCURRENT_WINDOWS: usize = 3;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -293,76 +297,145 @@ pub async fn unlock_calendar<P: PGPProviderSync>(
     })
 }
 
-pub async fn list_events<P: PGPProviderSync>(
-    client: &mut ApiClient,
-    account: &UnlockedAccount<P>,
-    pgp: &P,
+pub async fn list_raw_events(
+    client: &ApiClient,
     calendar_id: &str,
     from: i64,
     to: i64,
-) -> Result<Vec<Event>> {
-    let keys = unlock_calendar(client, account, pgp, calendar_id).await?;
+) -> Result<Vec<RawEvent>> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
-    for query_type in 0..=3 {
-        let mut windows = vec![(from, to)];
-        while let Some((window_from, window_to)) = windows.pop() {
-            let mut page = 0_usize;
-            loop {
-                let path = format!("/calendar/v1/{calendar_id}/events");
-                let response: EventsResponse = match client
-                    .get(
-                        &path,
-                        &[
-                            ("Start", window_from.to_string()),
-                            ("End", window_to.to_string()),
-                            ("Timezone", "UTC".to_string()),
-                            ("Type", query_type.to_string()),
-                            ("Page", page.to_string()),
-                            ("PageSize", PAGE_SIZE.to_string()),
-                        ],
+    let mut windows = event_windows(from, to);
+    while !windows.is_empty() {
+        let batch = std::mem::take(&mut windows);
+        let fetched = stream::iter(batch)
+            .map(|(window_from, window_to)| async move {
+                let (part_day_inside, part_day_before, full_day_inside, full_day_before) =
+                    tokio::join!(
+                        list_event_window(client, calendar_id, 0, window_from, window_to),
+                        list_event_window(client, calendar_id, 1, window_from, window_to),
+                        list_event_window(client, calendar_id, 2, window_from, window_to),
+                        list_event_window(client, calendar_id, 3, window_from, window_to),
+                    );
+                (
+                    window_from,
+                    window_to,
+                    [
+                        (0, part_day_inside),
+                        (1, part_day_before),
+                        (2, full_day_inside),
+                        (3, full_day_before),
+                    ],
+                )
+            })
+            .buffered(MAX_CONCURRENT_WINDOWS)
+            .collect::<Vec<_>>()
+            .await;
+
+        for (window_from, window_to, responses) in fetched {
+            if responses
+                .iter()
+                .filter_map(|(_, response)| response.as_ref().err())
+                .any(crate::api::is_time_window_too_big)
+            {
+                let [earlier, later] = split_window(window_from, window_to).with_context(|| {
+                    format!("Proton rejected the minimum event window {window_from}..{window_to}")
+                })?;
+                windows.push_back(earlier);
+                windows.push_back(later);
+                continue;
+            }
+
+            for (query_type, response) in responses {
+                let events = response.with_context(|| {
+                    format!(
+                        "Failed to list Proton events (calendar {calendar_id}, type {query_type}, window {window_from}..{window_to})"
                     )
-                    .await
-                {
-                    Ok(response) => response,
-                    Err(error) if crate::api::is_time_window_too_big(&error) => {
-                        let [earlier, later] = split_window(window_from, window_to).ok_or(error)?;
-                        windows.push(later);
-                        windows.push(earlier);
-                        break;
-                    }
-                    Err(error) => {
-                        return Err(error).with_context(|| {
-                            format!(
-                                "Failed to list Proton events (calendar {calendar_id}, type {query_type}, page {page}, window {window_from}..{window_to})"
-                            )
-                        });
-                    }
-                };
-                let count = response.events.len();
-                let has_more = response.more.map_or(count == PAGE_SIZE, |more| more == 1);
-                for raw in response.events {
-                    if !seen.insert(raw.id.clone()) {
-                        continue;
-                    }
-                    match decrypt_event(pgp, &keys, &raw)
-                        .and_then(|payloads| event_from_payloads(&raw, &payloads))
-                    {
-                        Ok(event) => result.push(event),
-                        Err(error) => eprintln!(
-                            "caldir-provider-proton: skipping malformed event {}: {error:#}",
-                            raw.id
-                        ),
+                })?;
+                for raw in events {
+                    if seen.insert(raw.id.clone()) {
+                        result.push(raw);
                     }
                 }
-                if !has_more {
-                    break;
-                }
-                page += 1;
             }
         }
     }
     Ok(result)
+}
+
+pub async fn decrypt_events<P: PGPProviderSync>(
+    client: &mut ApiClient,
+    account: &UnlockedAccount<P>,
+    pgp: &P,
+    calendar_id: &str,
+    events: Vec<RawEvent>,
+) -> Result<Vec<Event>> {
+    let keys = unlock_calendar(client, account, pgp, calendar_id).await?;
+    let mut result = Vec::with_capacity(events.len());
+    for raw in events {
+        match decrypt_event(pgp, &keys, &raw)
+            .and_then(|payloads| event_from_payloads(&raw, &payloads))
+        {
+            Ok(event) => result.push(event),
+            Err(error) => eprintln!(
+                "caldir-provider-proton: skipping malformed event {}: {error:#}",
+                raw.id
+            ),
+        }
+    }
+    Ok(result)
+}
+
+async fn list_event_window(
+    client: &ApiClient,
+    calendar_id: &str,
+    query_type: u8,
+    from: i64,
+    to: i64,
+) -> Result<Vec<RawEvent>> {
+    let path = format!("/calendar/v1/{calendar_id}/events");
+    let mut result = Vec::new();
+    let mut page = 0_usize;
+    loop {
+        let response: EventsResponse = client
+            .get(
+                &path,
+                &[
+                    ("Start", from.to_string()),
+                    ("End", to.to_string()),
+                    ("Timezone", "UTC".to_string()),
+                    ("Type", query_type.to_string()),
+                    ("Page", page.to_string()),
+                    ("PageSize", PAGE_SIZE.to_string()),
+                ],
+            )
+            .await
+            .with_context(|| {
+                format!("Failed Proton event page {page} (type {query_type}, window {from}..{to})")
+            })?;
+        let count = response.events.len();
+        let has_more = response.more.map_or(count == PAGE_SIZE, |more| more == 1);
+        result.extend(response.events);
+        if !has_more {
+            break;
+        }
+        page += 1;
+    }
+    Ok(result)
+}
+
+fn event_windows(from: i64, to: i64) -> VecDeque<(i64, i64)> {
+    let mut result = VecDeque::new();
+    let mut window_from = from;
+    while window_from < to {
+        let window_to = window_from.saturating_add(EVENT_WINDOW_SECONDS).min(to);
+        result.push_back((window_from, window_to));
+        window_from = window_to;
+    }
+    if result.is_empty() {
+        result.push_back((from, to));
+    }
+    result
 }
 
 fn split_window(from: i64, to: i64) -> Option<[(i64, i64); 2]> {
@@ -671,7 +744,22 @@ fn sync_event_id(value: &Value) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::split_window;
+    use super::{EVENT_WINDOW_SECONDS, event_windows, split_window};
+
+    #[test]
+    fn event_windows_stay_within_protons_limit() {
+        assert_eq!(
+            event_windows(0, EVENT_WINDOW_SECONDS),
+            [(0, EVENT_WINDOW_SECONDS)]
+        );
+        assert_eq!(
+            event_windows(0, EVENT_WINDOW_SECONDS + 1),
+            [
+                (0, EVENT_WINDOW_SECONDS),
+                (EVENT_WINDOW_SECONDS, EVENT_WINDOW_SECONDS + 1)
+            ]
+        );
+    }
 
     #[test]
     fn split_window_preserves_the_requested_range() {

@@ -30,8 +30,11 @@ By default the provider uses `https://mail.proton.me/api`. Set
 
 - `X-PROTON-ITEM` links a local VEVENT to Proton's event ID.
 - Pulls query all four Proton calendar window types so recurring masters whose
-  `DTSTART` predates the window are retained. Ranges wider than Proton accepts
-  are split automatically and deduplicated after fetching.
+  `DTSTART` predates the window are retained. Large ranges use bounded,
+  concurrent one-year windows, with adaptive splitting if Proton lowers its
+  limit; results are deduplicated after fetching.
+- Event keys are loaded and decrypted only when the requested range contains
+  remote events.
 - `ModifyTime` becomes `LAST-MODIFIED`; recurring exceptions retain their
   `RECURRENCE-ID`.
 - Display alarms map to Proton device notifications. Proton email and device

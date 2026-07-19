@@ -23,15 +23,11 @@ pub async fn handle(cmd: ListEvents) -> Result<Vec<Event>> {
     let store = SessionStore::new(storage);
     let session = store.load(&remote.proton_account)?;
     let mut client = ApiClient::new(session.clone(), store)?;
+    let events = calendar::list_raw_events(&client, &remote.proton_calendar, from, to).await?;
+    if events.is_empty() {
+        return Ok(Vec::new());
+    }
     let pgp = proton_crypto::new_pgp_provider();
     let account = unlock_account(&mut client, &session, &pgp).await?;
-    calendar::list_events(
-        &mut client,
-        &account,
-        &pgp,
-        &remote.proton_calendar,
-        from,
-        to,
-    )
-    .await
+    calendar::decrypt_events(&mut client, &account, &pgp, &remote.proton_calendar, events).await
 }

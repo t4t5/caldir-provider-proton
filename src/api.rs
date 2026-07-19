@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -21,8 +22,9 @@ pub struct AuthTokens {
 
 pub struct ApiClient {
     http: reqwest::Client,
-    session: Session,
+    session: RwLock<Session>,
     store: Option<SessionStore>,
+    refresh_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Debug)]
@@ -54,41 +56,46 @@ impl ApiClient {
     pub fn new(session: Session, store: SessionStore) -> Result<Self> {
         Ok(Self {
             http: build_http_client()?,
-            session,
+            session: RwLock::new(session),
             store: Some(store),
+            refresh_lock: tokio::sync::Mutex::new(()),
         })
     }
 
     pub fn transient(session: Session) -> Result<Self> {
         Ok(Self {
             http: build_http_client()?,
-            session,
+            session: RwLock::new(session),
             store: None,
+            refresh_lock: tokio::sync::Mutex::new(()),
         })
     }
 
-    pub fn session(&self) -> &Session {
-        &self.session
+    pub fn session(&self) -> Session {
+        self.session
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub async fn get<T: DeserializeOwned>(
-        &mut self,
+        &self,
         path: &str,
         query: &[(&str, String)],
     ) -> Result<T> {
         self.request(Method::GET, path, query, None).await
     }
 
-    pub async fn post<T: DeserializeOwned>(&mut self, path: &str, body: Value) -> Result<T> {
+    pub async fn post<T: DeserializeOwned>(&self, path: &str, body: Value) -> Result<T> {
         self.request(Method::POST, path, &[], Some(body)).await
     }
 
-    pub async fn put<T: DeserializeOwned>(&mut self, path: &str, body: Value) -> Result<T> {
+    pub async fn put<T: DeserializeOwned>(&self, path: &str, body: Value) -> Result<T> {
         self.request(Method::PUT, path, &[], Some(body)).await
     }
 
     async fn request<T: DeserializeOwned>(
-        &mut self,
+        &self,
         method: Method,
         path: &str,
         query: &[(&str, String)],
@@ -97,12 +104,13 @@ impl ApiClient {
         let mut refreshed = false;
         let mut rate_limited = false;
         loop {
+            let session = self.session();
             let response = self
-                .send_once(method.clone(), path, query, body.clone())
+                .send_once(&session, method.clone(), path, query, body.clone())
                 .await?;
 
             if response.status() == StatusCode::UNAUTHORIZED && !refreshed {
-                self.refresh().await?;
+                self.refresh_if_current(&session.access_token).await?;
                 refreshed = true;
                 continue;
             }
@@ -132,19 +140,20 @@ impl ApiClient {
 
     async fn send_once(
         &self,
+        session: &Session,
         method: Method,
         path: &str,
         query: &[(&str, String)],
         body: Option<Value>,
     ) -> Result<reqwest::Response> {
-        let url = format!("{}{}", self.session.base_url.trim_end_matches('/'), path);
+        let url = format!("{}{}", session.base_url.trim_end_matches('/'), path);
         let mut request = self
             .http
             .request(method, url)
             .header("x-pm-appversion", APP_VERSION)
             .header("User-Agent", USER_AGENT)
-            .header("x-pm-uid", &self.session.uid)
-            .bearer_auth(&self.session.access_token)
+            .header("x-pm-uid", &session.uid)
+            .bearer_auth(&session.access_token)
             .query(query);
         if let Some(body) = body {
             request = request.json(&body);
@@ -152,7 +161,15 @@ impl ApiClient {
         request.send().await.context("Proton API request failed")
     }
 
-    async fn refresh(&mut self) -> Result<()> {
+    async fn refresh_if_current(&self, failed_access_token: &str) -> Result<()> {
+        let _guard = self.refresh_lock.lock().await;
+        if self.session().access_token != failed_access_token {
+            return Ok(());
+        }
+        self.refresh().await
+    }
+
+    async fn refresh(&self) -> Result<()> {
         #[derive(Deserialize)]
         #[serde(rename_all = "PascalCase")]
         struct RefreshResponse {
@@ -162,20 +179,18 @@ impl ApiClient {
             refresh_token: String,
         }
 
-        let url = format!(
-            "{}/auth/v4/refresh",
-            self.session.base_url.trim_end_matches('/')
-        );
+        let session = self.session();
+        let url = format!("{}/auth/v4/refresh", session.base_url.trim_end_matches('/'));
         let response = self
             .http
             .post(url)
             .header("x-pm-appversion", APP_VERSION)
             .header("User-Agent", USER_AGENT)
-            .header("x-pm-uid", &self.session.uid)
-            .bearer_auth(&self.session.access_token)
+            .header("x-pm-uid", &session.uid)
+            .bearer_auth(&session.access_token)
             .json(&json!({
-                "UID": self.session.uid,
-                "RefreshToken": self.session.refresh_token,
+                "UID": session.uid,
+                "RefreshToken": session.refresh_token,
                 "ResponseType": "token",
                 "GrantType": "refresh_token",
                 "RedirectURI": "https://protonmail.ch"
@@ -189,12 +204,19 @@ impl ApiClient {
             .context("Proton session expired; run `caldir connect proton` to authenticate again")?;
         let refreshed: RefreshResponse =
             serde_json::from_value(value).context("Invalid refresh token response")?;
-        self.session.uid = refreshed.uid;
-        self.session.access_token = refreshed.access_token;
-        self.session.refresh_token = refreshed.refresh_token;
+        let updated = {
+            let mut session = self
+                .session
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            session.uid = refreshed.uid;
+            session.access_token = refreshed.access_token;
+            session.refresh_token = refreshed.refresh_token;
+            session.clone()
+        };
         if let Some(store) = &self.store {
             store
-                .save(&self.session)
+                .save(&updated)
                 .context("Failed to persist rotated Proton tokens")?;
         }
         Ok(())
@@ -309,6 +331,7 @@ mod tests {
             }),
         )
         .unwrap_err();
+        let error = error.context("Failed event page");
 
         assert!(is_time_window_too_big(&error));
     }
