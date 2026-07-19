@@ -98,6 +98,13 @@ jobs:
         with:
           toolchain: ${{ steps.rust.outputs.channel }}
 
+      # Keep the checkout clean for Cargo's package verification. Downloading the
+      # release archives first would leave untracked files under artifacts/.
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -111,8 +118,3 @@ jobs:
           gh release create "$tag" artifacts/*.tar.gz \
             --title "$tag" \
             --generate-notes
-
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked
