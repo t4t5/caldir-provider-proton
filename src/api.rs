@@ -1,3 +1,4 @@
+use std::fmt;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -22,6 +23,31 @@ pub struct ApiClient {
     http: reqwest::Client,
     session: Session,
     store: Option<SessionStore>,
+}
+
+#[derive(Debug)]
+struct ProtonApiError {
+    code: i64,
+    status: StatusCode,
+    message: String,
+}
+
+impl fmt::Display for ProtonApiError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Proton API error {} (HTTP {}): {}",
+            self.code, self.status, self.message
+        )
+    }
+}
+
+impl std::error::Error for ProtonApiError {}
+
+pub(crate) fn is_time_window_too_big(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ProtonApiError>()
+        .is_some_and(|error| error.code == 2000 && error.message == "Time window is too big")
 }
 
 impl ApiClient {
@@ -242,7 +268,12 @@ fn check_api_response(status: StatusCode, value: &Value) -> Result<()> {
     if code == 10013 {
         bail!("Proton session expired; run `caldir connect proton` again");
     }
-    bail!("Proton API error {code} (HTTP {status}): {message}");
+    Err(ProtonApiError {
+        code,
+        status,
+        message: message.to_string(),
+    }
+    .into())
 }
 
 #[cfg(test)]
@@ -266,5 +297,33 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("captcha"));
         assert!(message.contains("https://verify.example"));
+    }
+
+    #[test]
+    fn identifies_time_window_limit_errors() {
+        let error = check_api_response(
+            StatusCode::BAD_REQUEST,
+            &json!({
+                "Code": 2000,
+                "Error": "Time window is too big"
+            }),
+        )
+        .unwrap_err();
+
+        assert!(is_time_window_too_big(&error));
+    }
+
+    #[test]
+    fn does_not_misclassify_other_invalid_requests() {
+        let error = check_api_response(
+            StatusCode::BAD_REQUEST,
+            &json!({
+                "Code": 2000,
+                "Error": "Invalid event type"
+            }),
+        )
+        .unwrap_err();
+
+        assert!(!is_time_window_too_big(&error));
     }
 }

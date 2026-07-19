@@ -200,6 +200,8 @@ pub struct AttendeesInfo {
 struct EventsResponse {
     #[serde(default)]
     events: Vec<RawEvent>,
+    #[serde(default)]
+    more: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -303,49 +305,73 @@ pub async fn list_events<P: PGPProviderSync>(
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     for query_type in 0..=3 {
-        let mut page = 0_usize;
-        loop {
-            let path = format!("/calendar/v1/{calendar_id}/events");
-            let response: EventsResponse = client
-                .get(
-                    &path,
-                    &[
-                        ("Start", from.to_string()),
-                        ("End", to.to_string()),
-                        ("Timezone", "UTC".to_string()),
-                        ("Type", query_type.to_string()),
-                        ("Page", page.to_string()),
-                        ("PageSize", PAGE_SIZE.to_string()),
-                    ],
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to list Proton events (calendar {calendar_id}, type {query_type}, page {page})"
+        let mut windows = vec![(from, to)];
+        while let Some((window_from, window_to)) = windows.pop() {
+            let mut page = 0_usize;
+            loop {
+                let path = format!("/calendar/v1/{calendar_id}/events");
+                let response: EventsResponse = match client
+                    .get(
+                        &path,
+                        &[
+                            ("Start", window_from.to_string()),
+                            ("End", window_to.to_string()),
+                            ("Timezone", "UTC".to_string()),
+                            ("Type", query_type.to_string()),
+                            ("Page", page.to_string()),
+                            ("PageSize", PAGE_SIZE.to_string()),
+                        ],
                     )
-                })?;
-            let count = response.events.len();
-            for raw in response.events {
-                if !seen.insert(raw.id.clone()) {
-                    continue;
-                }
-                match decrypt_event(pgp, &keys, &raw)
-                    .and_then(|payloads| event_from_payloads(&raw, &payloads))
+                    .await
                 {
-                    Ok(event) => result.push(event),
-                    Err(error) => eprintln!(
-                        "caldir-provider-proton: skipping malformed event {}: {error:#}",
-                        raw.id
-                    ),
+                    Ok(response) => response,
+                    Err(error) if crate::api::is_time_window_too_big(&error) => {
+                        let [earlier, later] = split_window(window_from, window_to).ok_or(error)?;
+                        windows.push(later);
+                        windows.push(earlier);
+                        break;
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "Failed to list Proton events (calendar {calendar_id}, type {query_type}, page {page}, window {window_from}..{window_to})"
+                            )
+                        });
+                    }
+                };
+                let count = response.events.len();
+                let has_more = response.more.map_or(count == PAGE_SIZE, |more| more == 1);
+                for raw in response.events {
+                    if !seen.insert(raw.id.clone()) {
+                        continue;
+                    }
+                    match decrypt_event(pgp, &keys, &raw)
+                        .and_then(|payloads| event_from_payloads(&raw, &payloads))
+                    {
+                        Ok(event) => result.push(event),
+                        Err(error) => eprintln!(
+                            "caldir-provider-proton: skipping malformed event {}: {error:#}",
+                            raw.id
+                        ),
+                    }
                 }
+                if !has_more {
+                    break;
+                }
+                page += 1;
             }
-            if count < PAGE_SIZE {
-                break;
-            }
-            page += 1;
         }
     }
     Ok(result)
+}
+
+fn split_window(from: i64, to: i64) -> Option<[(i64, i64); 2]> {
+    let width = to.checked_sub(from)?;
+    if width <= 1 {
+        return None;
+    }
+    let midpoint = from + width / 2;
+    Some([(from, midpoint), (midpoint, to)])
 }
 
 pub async fn get_event(
@@ -641,4 +667,21 @@ fn sync_event_id(value: &Value) -> Option<&str> {
         .or_else(|| value.pointer("/Responses/0/Response/Event/Id"))
         .or_else(|| value.pointer("/Responses/0/Event/ID"))
         .and_then(Value::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_window;
+
+    #[test]
+    fn split_window_preserves_the_requested_range() {
+        assert_eq!(split_window(100, 200), Some([(100, 150), (150, 200)]));
+        assert_eq!(split_window(100, 201), Some([(100, 150), (150, 201)]));
+    }
+
+    #[test]
+    fn split_window_stops_at_one_second() {
+        assert_eq!(split_window(100, 101), None);
+        assert_eq!(split_window(100, 100), None);
+    }
 }
