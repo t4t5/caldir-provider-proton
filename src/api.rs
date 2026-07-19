@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::constants::{APP_VERSION, USER_AGENT};
+use crate::constants::{APP_VERSION, PROTON_API_URL, USER_AGENT};
 use crate::session::{Session, SessionStore};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,7 +146,7 @@ impl ApiClient {
         query: &[(&str, String)],
         body: Option<Value>,
     ) -> Result<reqwest::Response> {
-        let url = format!("{}{}", session.base_url.trim_end_matches('/'), path);
+        let url = format!("{PROTON_API_URL}{path}");
         let mut request = self
             .http
             .request(method, url)
@@ -180,10 +180,9 @@ impl ApiClient {
         }
 
         let session = self.session();
-        let url = format!("{}/auth/v4/refresh", session.base_url.trim_end_matches('/'));
         let response = self
             .http
-            .post(url)
+            .post(format!("{PROTON_API_URL}/auth/v4/refresh"))
             .header("x-pm-appversion", APP_VERSION)
             .header("User-Agent", USER_AGENT)
             .header("x-pm-uid", &session.uid)
@@ -223,10 +222,9 @@ impl ApiClient {
     }
 }
 
-pub async fn create_unauth_session(base_url: &str) -> Result<AuthTokens> {
-    let url = format!("{}/auth/v4/sessions", base_url.trim_end_matches('/'));
+pub async fn create_unauth_session() -> Result<AuthTokens> {
     let response = build_http_client()?
-        .post(url)
+        .post(format!("{PROTON_API_URL}/auth/v4/sessions"))
         .header("x-pm-appversion", APP_VERSION)
         .header("User-Agent", USER_AGENT)
         .header("x-enforce-unauthsession", "true")

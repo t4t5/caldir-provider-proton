@@ -1,5 +1,5 @@
 pub const PROVIDER_NAME: &str = "proton";
-pub const DEFAULT_BASE_URL: &str = "https://mail.proton.me/api";
+pub const PROTON_API_URL: &str = "https://mail.proton.me/api";
 pub const APP_VERSION: &str = "Other";
 pub const USER_AGENT: &str = concat!("caldir-provider-proton/", env!("CARGO_PKG_VERSION"));
 pub const ITEM_UID_PROPERTY: &str = "X-PROTON-ITEM";

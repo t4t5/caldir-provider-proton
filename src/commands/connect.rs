@@ -7,7 +7,7 @@ use caldir_core::rpc::{
 
 use crate::api::{ApiClient, create_unauth_session};
 use crate::auth::{login_srp, submit_totp};
-use crate::constants::{DEFAULT_BASE_URL, PROVIDER_NAME};
+use crate::constants::PROVIDER_NAME;
 use crate::keys::{derive_key_password, unlock_account};
 use crate::session::{PendingSession, Session, SessionStore};
 
@@ -16,11 +16,8 @@ pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
     let store = SessionStore::new(storage);
     if let Some(email) = submitted(&cmd, "email") {
         let password = required(&cmd, "password")?;
-        let base_url =
-            std::env::var("PROTON_API_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        let unauth = create_unauth_session(&base_url).await?;
+        let unauth = create_unauth_session().await?;
         let transient = Session {
-            base_url: base_url.clone(),
             email: email.to_string(),
             uid: unauth.uid,
             access_token: unauth.access_token,
@@ -36,7 +33,6 @@ pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
             );
         }
         let pending = PendingSession {
-            base_url,
             email: email.to_string(),
             uid: login.uid,
             access_token: login.access_token,
@@ -129,7 +125,6 @@ async fn finish_login(
     let mut client = ApiClient::transient(transient)?;
     let key_password = derive_key_password(&mut client, mailbox_password).await?;
     let session = Session {
-        base_url: pending.base_url,
         email: pending.email,
         uid: client.session().uid.clone(),
         access_token: client.session().access_token.clone(),
@@ -151,7 +146,6 @@ async fn finish_login(
 
 fn session_from_pending(pending: &PendingSession, key_password: String) -> Session {
     Session {
-        base_url: pending.base_url.clone(),
         email: pending.email.clone(),
         uid: pending.uid.clone(),
         access_token: pending.access_token.clone(),

@@ -97,7 +97,6 @@ mod tests {
 
     fn sample_session() -> Session {
         Session {
-            base_url: "https://mail.proton.me/api".into(),
             email: "alice@proton.me".into(),
             uid: "uid".into(),
             access_token: "access".into(),
@@ -123,7 +122,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = SessionStore::new(ProviderStorage::new(tmp.path()));
         let pending = PendingSession {
-            base_url: "https://example.test".into(),
             email: "alice@example.test".into(),
             uid: "uid".into(),
             access_token: "access".into(),

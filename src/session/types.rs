@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
-    pub base_url: String,
     pub email: String,
     pub uid: String,
     pub access_token: String,
@@ -25,7 +24,6 @@ impl Session {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingSession {
-    pub base_url: String,
     pub email: String,
     pub uid: String,
     pub access_token: String,
