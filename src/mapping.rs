@@ -81,24 +81,31 @@ pub fn cards_from_event(event: &Event) -> Result<EventCards> {
     }
     let mut signed = Vec::new();
     let mut encrypted = Vec::new();
-    let calendar_signed = vec![
-        format!("STATUS:{}", event.status.as_ics_str()),
-        format!("TRANSP:{}", event.availability.as_ics_str()),
-    ];
+    // Proton rejects any card that lacks UID and DTSTAMP, so they go into every part.
+    let mut required = Vec::new();
     for line in extract_event_properties(&event.to_ics_string()) {
         let name = property_name(&line);
         match name.as_str() {
+            "UID" | "DTSTAMP" => {
+                required.push(line.clone());
+                signed.push(line);
+            }
             "DTSTART" | "DTEND" | "RRULE" | "EXDATE" | "RDATE" | "ORGANIZER" | "SEQUENCE"
-            | "UID" | "DTSTAMP" | "RECURRENCE-ID" => signed.push(line),
+            | "RECURRENCE-ID" => signed.push(line),
             "STATUS" | "TRANSP" => {}
             "LAST-MODIFIED" | "CREATED" => {}
             name if name.eq_ignore_ascii_case(ITEM_UID_PROPERTY) => {}
             _ => encrypted.push(line),
         }
     }
+    let mut calendar_signed = required.clone();
+    calendar_signed.push(format!("STATUS:{}", event.status.as_ics_str()));
+    calendar_signed.push(format!("TRANSP:{}", event.availability.as_ics_str()));
+    let mut shared_encrypted = required;
+    shared_encrypted.append(&mut encrypted);
     Ok(EventCards {
         shared_signed: wrap_event(&signed),
-        shared_encrypted: wrap_event(&encrypted),
+        shared_encrypted: wrap_event(&shared_encrypted),
         calendar_signed: Some(wrap_event(&calendar_signed)),
     })
 }
@@ -414,6 +421,14 @@ mod tests {
         assert!(cards.shared_encrypted.contains("SUMMARY:Private"));
         assert!(cards.shared_encrypted.contains("DESCRIPTION:Secret"));
         assert!(!cards.shared_encrypted.contains(ITEM_UID_PROPERTY));
+        // Proton requires UID and DTSTAMP in every card.
+        let calendar_signed = cards.calendar_signed.as_deref().unwrap();
+        for card in [cards.shared_encrypted.as_str(), calendar_signed] {
+            assert!(card.contains("UID:uid@example.test"));
+            assert!(card.contains("DTSTAMP:"));
+        }
+        assert!(calendar_signed.contains("STATUS:"));
+        assert!(calendar_signed.contains("TRANSP:"));
     }
 
     #[test]
