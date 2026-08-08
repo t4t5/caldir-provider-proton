@@ -492,6 +492,7 @@ pub async fn create_event<P: PGPProviderSync>(
     });
     let path = format!("/calendar/v1/{calendar_id}/events/sync");
     let response: Value = client.put(&path, body).await?;
+    check_sync_response(&response)?;
     let id = sync_event_id(&response).context("Proton create response has no event ID")?;
     crate::content::set_item_ref(&mut event, id);
     Ok(event)
@@ -543,7 +544,8 @@ pub async fn update_event<P: PGPProviderSync>(
         "Events": [{ "ID": event_id, "Event": remote_event }]
     });
     let path = format!("/calendar/v1/{calendar_id}/events/sync");
-    let _: Value = client.put(&path, body).await?;
+    let response: Value = client.put(&path, body).await?;
+    check_sync_response(&response)?;
     Ok(event)
 }
 
@@ -562,7 +564,8 @@ pub async fn delete_event<P: PGPProviderSync>(
         "Events": [{ "ID": event_id, "DeletionReason": 0 }]
     });
     let path = format!("/calendar/v1/{calendar_id}/events/sync");
-    let _: Value = client.put(&path, body).await?;
+    let response: Value = client.put(&path, body).await?;
+    check_sync_response(&response)?;
     Ok(())
 }
 
@@ -742,9 +745,50 @@ fn sync_event_id(value: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+fn check_sync_response(value: &Value) -> Result<()> {
+    let Some(responses) = value.get("Responses").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for item in responses {
+        let response = item.get("Response").unwrap_or(item);
+        let code = response.get("Code").and_then(Value::as_i64).unwrap_or(1000);
+        if !matches!(code, 1000 | 1001) {
+            let message = response
+                .get("Error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown Proton API error");
+            bail!("Proton rejected the event: {message} (code {code})");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EVENT_WINDOW_SECONDS, event_windows, split_window};
+    use super::{EVENT_WINDOW_SECONDS, check_sync_response, event_windows, split_window};
+    use serde_json::json;
+
+    #[test]
+    fn check_sync_response_accepts_successful_items() {
+        let response = json!({
+            "Code": 1001,
+            "Responses": [{ "Index": 0, "Response": { "Code": 1000, "Event": { "ID": "abc" } } }]
+        });
+        assert!(check_sync_response(&response).is_ok());
+    }
+
+    #[test]
+    fn check_sync_response_surfaces_per_item_errors() {
+        let response = json!({
+            "Code": 1001,
+            "Responses": [{ "Index": 0, "Response": { "Code": 2001, "Error": "Invalid event" } }]
+        });
+        let error = check_sync_response(&response).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Proton rejected the event: Invalid event (code 2001)"
+        );
+    }
 
     #[test]
     fn event_windows_stay_within_protons_limit() {
