@@ -14,8 +14,17 @@ categories = ["command-line-utilities"]
 name = "caldir-provider-proton"
 path = "src/main.rs"
 
+[[bin]]
+name = "caldir-proton-hv"
+path = "src/bin/hv.rs"
+required-features = ["hv"]
+
+[features]
+default = []
+hv = ["dep:tao", "dep:wry"]
+
 [dependencies]
-caldir-core = "0.11.2"
+caldir-core = "0.13.0"
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -30,6 +39,8 @@ base64 = "0.22"
 proton-srp = "0.8.2"
 proton-crypto = { version = "0.12.1", default-features = false, features = ["rustpgp"] }
 proton-crypto-account = { version = "0.18.1", default-features = false, features = ["rustpgp"] }
+wry = { version = "0.56", optional = true }
+tao = { version = "0.36", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

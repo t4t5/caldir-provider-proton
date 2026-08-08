@@ -62,8 +62,14 @@ jobs:
           toolchain: ${{ steps.rust.outputs.channel }}
           targets: ${{ matrix.target }}
 
+      - name: Install Linux webview dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libwebkit2gtk-4.1-dev
+
       - name: Build
-        run: cargo build --locked --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --features hv --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
@@ -71,6 +77,7 @@ jobs:
           archive="caldir-provider-proton-${{ matrix.target }}"
           mkdir "$archive"
           cp "target/${{ matrix.target }}/release/caldir-provider-proton" "$archive/"
+          cp "target/${{ matrix.target }}/release/caldir-proton-hv" "$archive/"
           cp README.md LICENSE "$archive/"
           tar -czf "${archive}.tar.gz" "$archive"
 

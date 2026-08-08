@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::constants::{APP_VERSION, PROTON_API_URL, USER_AGENT};
+use crate::hv::Challenge;
 use crate::session::{Session, SessionStore};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -32,10 +33,22 @@ struct ProtonApiError {
     code: i64,
     status: StatusCode,
     message: String,
+    challenge: Option<Challenge>,
 }
 
 impl fmt::Display for ProtonApiError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(challenge) = &self.challenge {
+            let methods = if challenge.methods.is_empty() {
+                "unknown".to_string()
+            } else {
+                challenge.methods.join(", ")
+            };
+            return write!(
+                formatter,
+                "Proton requires human verification (methods: {methods}). Sign in at https://account.proton.me, then run `caldir connect proton` again"
+            );
+        }
         write!(
             formatter,
             "Proton API error {} (HTTP {}): {}",
@@ -50,6 +63,12 @@ pub(crate) fn is_time_window_too_big(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<ProtonApiError>()
         .is_some_and(|error| error.code == 2000 && error.message == "Time window is too big")
+}
+
+pub(crate) fn human_verification_challenge(error: &anyhow::Error) -> Option<&Challenge> {
+    error
+        .downcast_ref::<ProtonApiError>()
+        .and_then(|error| error.challenge.as_ref())
 }
 
 impl ApiClient {
@@ -83,15 +102,26 @@ impl ApiClient {
         path: &str,
         query: &[(&str, String)],
     ) -> Result<T> {
-        self.request(Method::GET, path, query, None).await
+        self.request(Method::GET, path, query, None, None).await
     }
 
     pub async fn post<T: DeserializeOwned>(&self, path: &str, body: Value) -> Result<T> {
-        self.request(Method::POST, path, &[], Some(body)).await
+        self.request(Method::POST, path, &[], Some(body), None)
+            .await
+    }
+
+    pub async fn post_with_human_verification<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: Value,
+        token: &str,
+    ) -> Result<T> {
+        self.request(Method::POST, path, &[], Some(body), Some(token))
+            .await
     }
 
     pub async fn put<T: DeserializeOwned>(&self, path: &str, body: Value) -> Result<T> {
-        self.request(Method::PUT, path, &[], Some(body)).await
+        self.request(Method::PUT, path, &[], Some(body), None).await
     }
 
     async fn request<T: DeserializeOwned>(
@@ -100,13 +130,21 @@ impl ApiClient {
         path: &str,
         query: &[(&str, String)],
         body: Option<Value>,
+        human_verification_token: Option<&str>,
     ) -> Result<T> {
         let mut refreshed = false;
         let mut rate_limited = false;
         loop {
             let session = self.session();
             let response = self
-                .send_once(&session, method.clone(), path, query, body.clone())
+                .send_once(
+                    &session,
+                    method.clone(),
+                    path,
+                    query,
+                    body.clone(),
+                    human_verification_token,
+                )
                 .await?;
 
             if response.status() == StatusCode::UNAUTHORIZED && !refreshed {
@@ -127,6 +165,15 @@ impl ApiClient {
                 .bytes()
                 .await
                 .context("Failed to read Proton response")?;
+            if human_verification_token.is_some()
+                && path == "/core/v4/auth"
+                && std::env::var_os("CALDIR_PROTON_HV_DEBUG").is_some()
+            {
+                eprintln!(
+                    "Proton human-verification retry response (HTTP {status}): {}",
+                    String::from_utf8_lossy(&bytes)
+                );
+            }
             let value: Value = serde_json::from_slice(&bytes).with_context(|| {
                 format!(
                     "Proton returned invalid JSON (HTTP {status}): {}",
@@ -145,6 +192,7 @@ impl ApiClient {
         path: &str,
         query: &[(&str, String)],
         body: Option<Value>,
+        human_verification_token: Option<&str>,
     ) -> Result<reqwest::Response> {
         let url = format!("{PROTON_API_URL}{path}");
         let mut request = self
@@ -155,6 +203,7 @@ impl ApiClient {
             .header("x-pm-uid", &session.uid)
             .bearer_auth(&session.access_token)
             .query(query);
+        request = attach_human_verification_headers(request, human_verification_token);
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -222,6 +271,18 @@ impl ApiClient {
     }
 }
 
+fn attach_human_verification_headers(
+    request: reqwest::RequestBuilder,
+    token: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match token {
+        Some(token) => request
+            .header("x-pm-human-verification-token", token)
+            .header("x-pm-human-verification-token-type", "captcha"),
+        None => request,
+    }
+}
+
 pub async fn create_unauth_session() -> Result<AuthTokens> {
     let response = build_http_client()?
         .post(format!("{PROTON_API_URL}/auth/v4/sessions"))
@@ -268,20 +329,34 @@ fn check_api_response(status: StatusCode, value: &Value) -> Result<()> {
         .get("Error")
         .and_then(Value::as_str)
         .unwrap_or("unknown Proton API error");
-    if code == 9001 {
+    let challenge = (code == 9001).then(|| {
         let methods = value
             .pointer("/Details/HumanVerificationMethods")
             .or_else(|| value.pointer("/Details/Methods"))
-            .map(Value::to_string)
-            .unwrap_or_else(|| "unknown".to_string());
-        let web_url = value
-            .pointer("/Details/WebUrl")
-            .and_then(Value::as_str)
-            .unwrap_or("https://account.proton.me");
-        bail!(
-            "Proton requires human verification (methods: {methods}). Complete it at {web_url}, then retry from the same network"
-        );
-    }
+            .and_then(Value::as_array)
+            .map(|methods| {
+                methods
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Challenge {
+            token: value
+                .pointer("/Details/HumanVerificationToken")
+                .or_else(|| value.pointer("/Details/Token"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            methods,
+            web_url: value
+                .pointer("/Details/WebUrl")
+                .and_then(Value::as_str)
+                .unwrap_or("https://account.proton.me")
+                .to_string(),
+        }
+    });
     if code == 8002 {
         bail!("Proton rejected the username or password");
     }
@@ -292,6 +367,7 @@ fn check_api_response(status: StatusCode, value: &Value) -> Result<()> {
         code,
         status,
         message: message.to_string(),
+        challenge,
     }
     .into())
 }
@@ -309,14 +385,17 @@ mod tests {
                 "Error": "Human verification required",
                 "Details": {
                     "HumanVerificationMethods": ["captcha"],
+                    "HumanVerificationToken": "challenge-token",
                     "WebUrl": "https://verify.example"
                 }
             }),
         )
         .unwrap_err();
-        let message = error.to_string();
-        assert!(message.contains("captcha"));
-        assert!(message.contains("https://verify.example"));
+        let challenge = human_verification_challenge(&error).unwrap();
+        assert_eq!(challenge.methods, ["captcha"]);
+        assert_eq!(challenge.token, "challenge-token");
+        assert_eq!(challenge.web_url, "https://verify.example");
+        assert!(error.to_string().contains("https://account.proton.me"));
     }
 
     #[test]
@@ -346,5 +425,38 @@ mod tests {
         .unwrap_err();
 
         assert!(!is_time_window_too_big(&error));
+    }
+
+    #[test]
+    fn attaches_human_verification_headers_only_when_solved() {
+        let client = reqwest::Client::new();
+        let request = attach_human_verification_headers(
+            client.get("https://example.test"),
+            Some("solved-token"),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            request.headers()["x-pm-human-verification-token"],
+            "solved-token"
+        );
+        assert_eq!(
+            request.headers()["x-pm-human-verification-token-type"],
+            "captcha"
+        );
+
+        let request = attach_human_verification_headers(client.get("https://example.test"), None)
+            .build()
+            .unwrap();
+        assert!(
+            !request
+                .headers()
+                .contains_key("x-pm-human-verification-token")
+        );
+        assert!(
+            !request
+                .headers()
+                .contains_key("x-pm-human-verification-token-type")
+        );
     }
 }

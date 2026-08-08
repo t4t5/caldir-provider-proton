@@ -39,9 +39,10 @@ cargo test --test provider_crud -- --nocapture
 
 - Proton does not publish or support this API for third parties, so endpoints
   can change without notice.
-- FIDO2 authentication, human-verification solving, attendee/invite writes,
-  RSVP, and calendar management are not implemented.
-- Human-verification errors include Proton's available methods and web URL;
-  complete the check in a browser, then retry from the same network.
+- FIDO2 authentication, non-CAPTCHA human-verification methods, attendee/invite
+  writes, RSVP, and calendar management are not implemented.
+- CAPTCHA challenges during connect are solved by the optional
+  `caldir-proton-hv` webview helper. On headless machines, sign in at
+  `account.proton.me` from the same network, then retry connect.
 - The derived local key secret is protected by filesystem permissions, not an
   OS keyring. Revoking the Proton session does not erase the local file.

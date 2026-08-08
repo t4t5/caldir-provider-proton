@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use caldir_core::provider::ProviderStorage;
 use caldir_core::rpc::{
@@ -8,6 +8,7 @@ use caldir_core::rpc::{
 use crate::api::{ApiClient, create_unauth_session};
 use crate::auth::{login_srp, submit_totp};
 use crate::constants::PROVIDER_NAME;
+use crate::hv::HvError;
 use crate::keys::{derive_key_password, unlock_account};
 use crate::session::{PendingSession, Session, SessionStore};
 
@@ -26,7 +27,9 @@ pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
             password_mode: 1,
         };
         let mut client = ApiClient::transient(transient)?;
-        let login = login_srp(&mut client, email, password).await?;
+        let login = login_srp(&mut client, email, password)
+            .await
+            .map_err(map_human_verification_error)?;
         if login.two_factor.enabled != 0 && login.two_factor.enabled & 1 == 0 {
             bail!(
                 "This Proton account requires FIDO2 authentication, which caldir-provider-proton does not support"
@@ -186,6 +189,19 @@ fn required<'a>(cmd: &'a Connect, key: &str) -> Result<&'a str> {
     submitted(cmd, key).with_context(|| format!("Missing required Proton credential: {key}"))
 }
 
+fn map_human_verification_error(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<HvError>() {
+        Some(HvError::Unavailable(detail)) => anyhow!(
+            "Proton requires human verification, but the verification window could not be opened ({detail}). Sign in at https://account.proton.me and retry, or install the `caldir-proton-hv` helper with `cargo install caldir-provider-proton --features hv`"
+        ),
+        Some(HvError::Cancelled) => anyhow!(
+            "The Proton human-verification window was closed; retry `caldir connect proton` to start again"
+        ),
+        Some(HvError::Failed(detail)) => anyhow!("Proton human verification failed: {detail}"),
+        None => error,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +218,19 @@ mod tests {
         assert_eq!(value["status"], "needs_input");
         assert_eq!(value["fields"][0]["id"], "email");
         assert_eq!(value["fields"][1]["id"], "password");
+    }
+
+    #[test]
+    fn unavailable_human_verification_names_both_fallbacks() {
+        let error = map_human_verification_error(HvError::Unavailable("no display".into()).into());
+        let message = error.to_string();
+        assert!(message.contains("https://account.proton.me"));
+        assert!(message.contains("caldir-proton-hv"));
+    }
+
+    #[test]
+    fn cancelled_human_verification_reports_closed_window() {
+        let error = map_human_verification_error(HvError::Cancelled.into());
+        assert!(error.to_string().contains("window was closed"));
     }
 }

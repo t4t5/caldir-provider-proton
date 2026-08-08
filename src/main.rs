@@ -4,6 +4,7 @@ mod calendar;
 mod commands;
 mod constants;
 mod content;
+mod hv;
 mod keys;
 mod mapping;
 mod remote_config;

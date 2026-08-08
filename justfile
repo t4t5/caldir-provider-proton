@@ -10,4 +10,4 @@ fmt:
 
 # Install provider binary to PATH
 install:
-  cargo install --path .
+  cargo install --path . --features hv
