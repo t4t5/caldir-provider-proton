@@ -5,10 +5,14 @@ mod commands;
 mod constants;
 mod content;
 mod hv;
+#[cfg(feature = "hv")]
+mod hv_window;
 mod keys;
 mod mapping;
 mod remote_config;
 mod session;
+
+use std::env;
 
 use async_trait::async_trait;
 use caldir_core::provider;
@@ -46,7 +50,24 @@ impl provider::Handler for ProtonProvider {
     }
 }
 
+fn main() {
+    let mut arguments = env::args_os().skip(1);
+    if arguments
+        .next()
+        .is_some_and(|argument| argument == hv::HELPER_FLAG)
+    {
+        #[cfg(feature = "hv")]
+        hv_window::run_from_args(arguments);
+        #[cfg(not(feature = "hv"))]
+        {
+            eprintln!("hv: unavailable: this build does not include the `hv` feature");
+            std::process::exit(3);
+        }
+    }
+    run_provider();
+}
+
 #[tokio::main(flavor = "current_thread")]
-async fn main() {
+async fn run_provider() {
     provider::run_provider(ProtonProvider).await;
 }

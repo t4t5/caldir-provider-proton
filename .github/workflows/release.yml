@@ -77,7 +77,6 @@ jobs:
           archive="caldir-provider-proton-${{ matrix.target }}"
           mkdir "$archive"
           cp "target/${{ matrix.target }}/release/caldir-provider-proton" "$archive/"
-          cp "target/${{ matrix.target }}/release/caldir-proton-hv" "$archive/"
           cp README.md LICENSE "$archive/"
           tar -czf "${archive}.tar.gz" "$archive"
 

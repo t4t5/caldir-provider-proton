@@ -14,17 +14,12 @@ categories = ["command-line-utilities"]
 name = "caldir-provider-proton"
 path = "src/main.rs"
 
-[[bin]]
-name = "caldir-proton-hv"
-path = "src/bin/hv.rs"
-required-features = ["hv"]
-
 [features]
 default = []
 hv = ["dep:tao", "dep:wry"]
 
 [dependencies]
-caldir-core = "0.13.0"
+caldir-core = "0.17.1"
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

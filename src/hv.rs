@@ -1,11 +1,14 @@
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fmt;
-use std::path::PathBuf;
 use std::process::{Command, Output};
 
-const HELPER_NAME: &str = "caldir-proton-hv";
-const HELPER_ENV: &str = "CALDIR_PROTON_HV_HELPER";
+/// Re-runs this binary as the CAPTCHA window (`hv_window.rs`). The window runs in a
+/// separate process because its event loop must own the main thread.
+///
+/// Helper contract: token on stdout; exit codes 0 ok / 2 usage / 3 unavailable /
+/// 4 cancelled / 5 timeout; `hv: <category>: <detail>` on stderr.
+pub const HELPER_FLAG: &str = "--human-verification";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Challenge {
@@ -59,45 +62,28 @@ pub fn resolve(challenge: &Challenge) -> Result<String, HvError> {
         ));
     }
 
-    let helper = locate_helper();
-    resolve_with_helper(&helper, &challenge.token)
-}
-
-fn locate_helper() -> OsString {
-    if let Some(helper) = env::var_os(HELPER_ENV).filter(|value| !value.is_empty()) {
-        return helper;
+    if !cfg!(feature = "hv") {
+        return Err(HvError::Unavailable(
+            "this build does not include the `hv` feature".to_string(),
+        ));
     }
-
-    if let Ok(executable) = env::current_exe()
-        && let Some(directory) = executable.parent()
-    {
-        let sibling = directory.join(helper_filename());
-        if sibling.is_file() {
-            return sibling.into_os_string();
-        }
-    }
-
-    OsString::from(HELPER_NAME)
-}
-
-fn helper_filename() -> PathBuf {
-    #[cfg(windows)]
-    {
-        PathBuf::from(format!("{HELPER_NAME}.exe"))
-    }
-    #[cfg(not(windows))]
-    {
-        PathBuf::from(HELPER_NAME)
-    }
+    let executable = env::current_exe().map_err(|error| {
+        HvError::Unavailable(format!("could not locate the provider executable: {error}"))
+    })?;
+    resolve_with_helper(executable.as_os_str(), &challenge.token)
 }
 
 fn resolve_with_helper(helper: &OsStr, token: &str) -> Result<String, HvError> {
-    let output = Command::new(helper).arg(token).output().map_err(|error| {
-        HvError::Unavailable(format!(
-            "could not start {}: {error}",
-            helper.to_string_lossy()
-        ))
-    })?;
+    let output = Command::new(helper)
+        .arg(HELPER_FLAG)
+        .arg(token)
+        .output()
+        .map_err(|error| {
+            HvError::Unavailable(format!(
+                "could not start {}: {error}",
+                helper.to_string_lossy()
+            ))
+        })?;
     translate_output(output)
 }
 
@@ -149,13 +135,14 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     static HELPER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn helper(exit_code: i32, stdout: &str, stderr: &str) -> (tempfile::TempDir, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join(HELPER_NAME);
+        let path = directory.path().join("helper");
         let script = format!(
             "#!/bin/sh\nprintf '%s' '{}'\nprintf '%s' '{}' >&2\nexit {}\n",
             stdout, stderr, exit_code

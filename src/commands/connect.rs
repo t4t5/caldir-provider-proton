@@ -192,11 +192,11 @@ fn required<'a>(cmd: &'a Connect, key: &str) -> Result<&'a str> {
 fn map_human_verification_error(error: anyhow::Error) -> anyhow::Error {
     match error.downcast_ref::<HvError>() {
         Some(HvError::Unavailable(detail)) => anyhow!(
-            "Proton requires human verification, but the verification window could not be opened ({detail}). Sign in at https://account.proton.me and retry, or install the `caldir-proton-hv` helper with `cargo install caldir-provider-proton --features hv`"
+            "Proton requires human verification, but the verification window could not be opened ({detail}). Sign in at https://account.proton.me from this network and retry, or install a build with the `hv` feature (`cargo install caldir-provider-proton --features hv`)"
         ),
-        Some(HvError::Cancelled) => anyhow!(
-            "The Proton human-verification window was closed; retry `caldir connect proton` to start again"
-        ),
+        Some(HvError::Cancelled) => {
+            anyhow!("The Proton human-verification window was closed; connect again to retry")
+        }
         Some(HvError::Failed(detail)) => anyhow!("Proton human verification failed: {detail}"),
         None => error,
     }
@@ -225,7 +225,7 @@ mod tests {
         let error = map_human_verification_error(HvError::Unavailable("no display".into()).into());
         let message = error.to_string();
         assert!(message.contains("https://account.proton.me"));
-        assert!(message.contains("caldir-proton-hv"));
+        assert!(message.contains("--features hv"));
     }
 
     #[test]
