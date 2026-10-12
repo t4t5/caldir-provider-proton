@@ -1,3 +1,5 @@
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -69,25 +71,29 @@ fn atomic_private_write(path: &Path, contents: &str) -> Result<()> {
     std::fs::create_dir_all(parent)
         .with_context(|| format!("Failed to create {}", parent.display()))?;
     let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    std::fs::write(&temporary, contents)
+    create_private_file(&temporary)
+        .and_then(|mut file| file.write_all(contents.as_bytes()))
         .with_context(|| format!("Failed to write {}", temporary.display()))?;
-    set_private_permissions(&temporary)?;
     std::fs::rename(&temporary, path)
         .with_context(|| format!("Failed to atomically replace {}", path.display()))?;
-    set_private_permissions(path)?;
     Ok(())
 }
 
-#[cfg(unix)]
-fn set_private_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_permissions(_path: &Path) -> Result<()> {
-    Ok(())
+/// Owner-only from creation, so secrets are never briefly readable by others.
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    // Clear a leftover from an interrupted write so `create_new` can succeed.
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 #[cfg(test)]
@@ -150,6 +156,25 @@ mod tests {
             .join(format!("{}.toml", Session::slug(&session.email)));
         assert_eq!(
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leftover_temporary_file_does_not_leak_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("pending.toml");
+        let leftover = path.with_extension(format!("tmp-{}", std::process::id()));
+        std::fs::write(&leftover, "stale").unwrap();
+        std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        atomic_private_write(&path, "secret").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
     }

@@ -46,7 +46,7 @@ pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
         };
         if pending.needs_totp {
             store.save_pending(&pending)?;
-            return prompt("totp", "TOTP code", FieldType::Password, None);
+            return prompt("totp", "TOTP code", FieldType::Text, None);
         }
         if pending.password_mode == 2 {
             store.save_pending(&pending)?;
