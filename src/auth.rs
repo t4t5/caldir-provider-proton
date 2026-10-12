@@ -3,7 +3,8 @@ use proton_srp::{SRPAuth, SRPProofB64, SrpHashVersion};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::api::ApiClient;
+use crate::api::{ApiClient, human_verification_challenge};
+use crate::hv;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -42,10 +43,36 @@ pub async fn login_srp(
     username: &str,
     password: &str,
 ) -> Result<LoginResponse> {
-    let info: AuthInfo = client
-        .post("/core/v4/auth/info", json!({ "Username": username }))
-        .await
-        .context("Failed to load Proton SRP parameters")?;
+    match login_srp_attempt(client, username, password, None).await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            let Some(challenge) = human_verification_challenge(&error) else {
+                return Err(error);
+            };
+            let token = hv::resolve(challenge)?;
+            login_srp_attempt(client, username, password, Some(&token))
+                .await
+                .context("Proton login failed after human verification")
+        }
+    }
+}
+
+async fn login_srp_attempt(
+    client: &mut ApiClient,
+    username: &str,
+    password: &str,
+    human_verification_token: Option<&str>,
+) -> Result<LoginResponse> {
+    let info_body = json!({ "Username": username });
+    let info: AuthInfo = match human_verification_token {
+        Some(token) => {
+            client
+                .post_with_human_verification("/core/v4/auth/info", info_body, token)
+                .await
+        }
+        None => client.post("/core/v4/auth/info", info_body).await,
+    }
+    .context("Failed to load Proton SRP parameters")?;
     let version =
         SrpHashVersion::try_from(info.version).context("Unsupported Proton SRP version")?;
     let auth = SRPAuth::with_pgp(
@@ -61,18 +88,21 @@ pub async fn login_srp(
         .generate_proofs()
         .context("Failed to generate Proton SRP proof")?
         .into();
-    let response: LoginResponse = client
-        .post(
-            "/core/v4/auth",
-            json!({
-                "Username": username,
-                "ClientProof": proof.client_proof,
-                "ClientEphemeral": proof.client_ephemeral,
-                "SRPSession": info.srp_session,
-            }),
-        )
-        .await
-        .context("Proton login failed")?;
+    let auth_body = json!({
+        "Username": username,
+        "ClientProof": proof.client_proof,
+        "ClientEphemeral": proof.client_ephemeral,
+        "SRPSession": info.srp_session,
+    });
+    let response: LoginResponse = match human_verification_token {
+        Some(token) => {
+            client
+                .post_with_human_verification("/core/v4/auth", auth_body, token)
+                .await
+        }
+        None => client.post("/core/v4/auth", auth_body).await,
+    }
+    .context("Proton login failed")?;
     if !proof.compare_server_proof(&response.server_proof) {
         bail!("Proton SRP server proof verification failed");
     }
