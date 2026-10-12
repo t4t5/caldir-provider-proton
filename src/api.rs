@@ -165,15 +165,6 @@ impl ApiClient {
                 .bytes()
                 .await
                 .context("Failed to read Proton response")?;
-            if human_verification_token.is_some()
-                && path == "/core/v4/auth"
-                && std::env::var_os("CALDIR_PROTON_HV_DEBUG").is_some()
-            {
-                eprintln!(
-                    "Proton human-verification retry response (HTTP {status}): {}",
-                    String::from_utf8_lossy(&bytes)
-                );
-            }
             let value: Value = serde_json::from_slice(&bytes).with_context(|| {
                 format!(
                     "Proton returned invalid JSON (HTTP {status}): {}",
