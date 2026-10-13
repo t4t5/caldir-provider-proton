@@ -15,7 +15,7 @@ mod session;
 use std::env;
 
 use async_trait::async_trait;
-use caldir_core::provider;
+use caldir_core::provider::{self, ProviderStorage};
 use caldir_core::rpc::{
     Connect, ConnectResponse, CreateEvent, DeleteEvent, ListCalendars, ListEvents, UpdateEvent,
 };
@@ -69,5 +69,9 @@ fn main() {
 
 #[tokio::main(flavor = "current_thread")]
 async fn run_provider() {
+    // Drop an abandoned 2FA login so its password doesn't stay on disk.
+    if let Ok(storage) = ProviderStorage::for_provider(constants::PROVIDER_NAME) {
+        let _ = session::SessionStore::new(storage).discard_stale_pending();
+    }
     provider::run_provider(ProtonProvider).await;
 }

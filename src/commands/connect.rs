@@ -16,6 +16,7 @@ pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
     let storage = ProviderStorage::for_provider(PROVIDER_NAME)?;
     let store = SessionStore::new(storage);
     if let Some(email) = submitted(&cmd, "email") {
+        store.clear_pending()?;
         let password = required(&cmd, "password")?;
         let unauth = create_unauth_session().await?;
         let transient = Session {
@@ -40,9 +41,10 @@ pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
             uid: login.uid,
             access_token: login.access_token,
             refresh_token: login.refresh_token,
-            login_password: password.to_string(),
+            login_password: (login.password_mode != 2).then(|| password.to_string()),
             password_mode: login.password_mode,
             needs_totp: login.two_factor.enabled & 1 != 0,
+            created_at: chrono::Utc::now().timestamp(),
         };
         if pending.needs_totp {
             store.save_pending(&pending)?;
@@ -57,7 +59,7 @@ pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
                 Some("This account uses a separate password to unlock encrypted data."),
             );
         }
-        return finish_login(&store, pending.clone(), &pending.login_password).await;
+        return finish_login(&store, pending, password).await;
     }
 
     if let Some(totp) = submitted(&cmd, "totp") {
@@ -81,7 +83,10 @@ pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
                 Some("This account uses a separate password to unlock encrypted data."),
             );
         }
-        let password = pending.login_password.clone();
+        let password = pending
+            .login_password
+            .take()
+            .context("The pending Proton login has no password; restart `caldir connect proton`")?;
         return finish_login(&store, pending, &password).await;
     }
 

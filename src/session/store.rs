@@ -42,10 +42,26 @@ impl SessionStore {
     }
 
     pub fn load_pending(&self) -> Result<PendingSession> {
+        self.discard_stale_pending()?;
         let path = self.pending_path();
-        let contents = std::fs::read_to_string(&path)
-            .context("No pending Proton login found; restart `caldir connect proton`")?;
+        let contents = std::fs::read_to_string(&path).context(
+            "No pending Proton login found (it may have expired); restart `caldir connect proton`",
+        )?;
         toml::from_str(&contents).context("Failed to parse pending Proton login")
+    }
+
+    /// Deletes a pending login that has expired or can't be parsed.
+    pub fn discard_stale_pending(&self) -> Result<()> {
+        let Ok(contents) = std::fs::read_to_string(self.pending_path()) else {
+            return Ok(());
+        };
+        let now = chrono::Utc::now().timestamp();
+        let fresh = toml::from_str::<PendingSession>(&contents)
+            .is_ok_and(|pending| !pending.is_expired(now));
+        if !fresh {
+            self.clear_pending()?;
+        }
+        Ok(())
     }
 
     pub fn clear_pending(&self) -> Result<()> {
@@ -99,6 +115,7 @@ fn create_private_file(path: &Path) -> std::io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::types::PENDING_TTL_SECONDS;
     use tempfile::TempDir;
 
     fn sample_session() -> Session {
@@ -110,6 +127,23 @@ mod tests {
             key_password: "c2VjcmV0".into(),
             password_mode: 1,
         }
+    }
+
+    fn sample_pending(created_at: i64) -> PendingSession {
+        PendingSession {
+            email: "alice@example.test".into(),
+            uid: "uid".into(),
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            login_password: Some("password".into()),
+            password_mode: 1,
+            needs_totp: true,
+            created_at,
+        }
+    }
+
+    fn now() -> i64 {
+        chrono::Utc::now().timestamp()
     }
 
     #[test]
@@ -127,19 +161,58 @@ mod tests {
     fn pending_round_trip_and_clear() {
         let tmp = TempDir::new().unwrap();
         let store = SessionStore::new(ProviderStorage::new(tmp.path()));
-        let pending = PendingSession {
-            email: "alice@example.test".into(),
-            uid: "uid".into(),
-            access_token: "access".into(),
-            refresh_token: "refresh".into(),
-            login_password: "password".into(),
-            password_mode: 1,
-            needs_totp: true,
-        };
-        store.save_pending(&pending).unwrap();
+        store.save_pending(&sample_pending(now())).unwrap();
         assert!(store.load_pending().unwrap().needs_totp);
         store.clear_pending().unwrap();
         assert!(store.load_pending().is_err());
+    }
+
+    #[test]
+    fn expired_pending_is_deleted_on_load() {
+        let tmp = TempDir::new().unwrap();
+        let store = SessionStore::new(ProviderStorage::new(tmp.path()));
+        store
+            .save_pending(&sample_pending(now() - PENDING_TTL_SECONDS))
+            .unwrap();
+        assert!(store.load_pending().is_err());
+        assert!(!tmp.path().join("pending.toml").exists());
+    }
+
+    #[test]
+    fn discard_stale_pending_keeps_fresh_login() {
+        let tmp = TempDir::new().unwrap();
+        let store = SessionStore::new(ProviderStorage::new(tmp.path()));
+        store.save_pending(&sample_pending(now())).unwrap();
+        store.discard_stale_pending().unwrap();
+        assert!(tmp.path().join("pending.toml").exists());
+    }
+
+    #[test]
+    fn discard_stale_pending_removes_legacy_login_without_timestamp() {
+        let tmp = TempDir::new().unwrap();
+        let store = SessionStore::new(ProviderStorage::new(tmp.path()));
+        let path = tmp.path().join("pending.toml");
+        std::fs::write(
+            &path,
+            r#"email = "alice@example.test"
+uid = "uid"
+access_token = "access"
+refresh_token = "refresh"
+login_password = "password"
+password_mode = 1
+needs_totp = true
+"#,
+        )
+        .unwrap();
+        store.discard_stale_pending().unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn discard_stale_pending_without_file_is_ok() {
+        let tmp = TempDir::new().unwrap();
+        let store = SessionStore::new(ProviderStorage::new(tmp.path()));
+        store.discard_stale_pending().unwrap();
     }
 
     #[cfg(unix)]

@@ -19,6 +19,9 @@ MIT-licensed Rust crypto crates. It identifies itself honestly with
   `~/.config/caldir/providers/proton/` (or
   `$CALDIR_PROVIDER_STORAGE_DIR`) in owner-only files. Refresh-token rotation
   is persisted atomically.
+- Between connect steps, `pending.toml` holds the login password only for
+  single-password accounts awaiting a TOTP code. Pending logins expire after
+  10 minutes and are deleted on the next provider run or new connect.
 - Reads decrypt shared, personal-calendar, and attendee cards. Mutations of
   events with attendees, or events where the current user is not organizer,
   are refused to avoid damaging invitation state.
