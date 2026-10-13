@@ -19,6 +19,9 @@ MIT-licensed Rust crypto crates. It identifies itself honestly with
   `~/.config/caldir/providers/proton/` (or
   `$CALDIR_PROVIDER_STORAGE_DIR`) in owner-only files. Refresh-token rotation
   is persisted atomically.
+- Between connect steps, `pending.toml` holds the login password only for
+  single-password accounts awaiting a TOTP code. Pending logins expire after
+  10 minutes and are deleted on the next provider run or new connect.
 - Reads decrypt shared, personal-calendar, and attendee cards. Mutations of
   events with attendees, or events where the current user is not organizer,
   are refused to avoid damaging invitation state.
@@ -41,8 +44,11 @@ cargo test --test provider_crud -- --nocapture
   can change without notice.
 - FIDO2 authentication, non-CAPTCHA human-verification methods, attendee/invite
   writes, RSVP, and calendar management are not implemented.
-- CAPTCHA challenges during connect are solved by the optional
-  `caldir-proton-hv` webview helper. On headless machines, sign in at
-  `account.proton.me` from the same network, then retry connect.
+- CAPTCHA challenges during connect are solved in a webview window when the
+  provider is built with the optional `hv` feature (release archives are). The
+  provider re-runs its own binary with `--human-verification <token>` to show
+  it, so the window runs in its own process and no separate helper needs to be
+  installed. On headless machines, sign in at `account.proton.me` from the same
+  network, then retry connect.
 - The derived local key secret is protected by filesystem permissions, not an
   OS keyring. Revoking the Proton session does not erase the local file.

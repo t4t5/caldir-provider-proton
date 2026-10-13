@@ -5,13 +5,17 @@ mod commands;
 mod constants;
 mod content;
 mod hv;
+#[cfg(feature = "hv")]
+mod hv_window;
 mod keys;
 mod mapping;
 mod remote_config;
 mod session;
 
+use std::env;
+
 use async_trait::async_trait;
-use caldir_core::provider;
+use caldir_core::provider::{self, ProviderStorage};
 use caldir_core::rpc::{
     Connect, ConnectResponse, CreateEvent, DeleteEvent, ListCalendars, ListEvents, UpdateEvent,
 };
@@ -46,7 +50,28 @@ impl provider::Handler for ProtonProvider {
     }
 }
 
+fn main() {
+    let mut arguments = env::args_os().skip(1);
+    if arguments
+        .next()
+        .is_some_and(|argument| argument == hv::HELPER_FLAG)
+    {
+        #[cfg(feature = "hv")]
+        hv_window::run_from_args(arguments);
+        #[cfg(not(feature = "hv"))]
+        {
+            eprintln!("hv: unavailable: this build does not include the `hv` feature");
+            std::process::exit(3);
+        }
+    }
+    run_provider();
+}
+
 #[tokio::main(flavor = "current_thread")]
-async fn main() {
+async fn run_provider() {
+    // Drop an abandoned 2FA login so its password doesn't stay on disk.
+    if let Ok(storage) = ProviderStorage::for_provider(constants::PROVIDER_NAME) {
+        let _ = session::SessionStore::new(storage).discard_stale_pending();
+    }
     provider::run_provider(ProtonProvider).await;
 }

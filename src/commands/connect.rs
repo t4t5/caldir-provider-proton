@@ -16,6 +16,7 @@ pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
     let storage = ProviderStorage::for_provider(PROVIDER_NAME)?;
     let store = SessionStore::new(storage);
     if let Some(email) = submitted(&cmd, "email") {
+        store.clear_pending()?;
         let password = required(&cmd, "password")?;
         let unauth = create_unauth_session().await?;
         let transient = Session {
@@ -40,13 +41,14 @@ pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
             uid: login.uid,
             access_token: login.access_token,
             refresh_token: login.refresh_token,
-            login_password: password.to_string(),
+            login_password: (login.password_mode != 2).then(|| password.to_string()),
             password_mode: login.password_mode,
             needs_totp: login.two_factor.enabled & 1 != 0,
+            created_at: chrono::Utc::now().timestamp(),
         };
         if pending.needs_totp {
             store.save_pending(&pending)?;
-            return prompt("totp", "TOTP code", FieldType::Password, None);
+            return prompt("totp", "TOTP code", FieldType::Text, None);
         }
         if pending.password_mode == 2 {
             store.save_pending(&pending)?;
@@ -57,7 +59,7 @@ pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
                 Some("This account uses a separate password to unlock encrypted data."),
             );
         }
-        return finish_login(&store, pending.clone(), &pending.login_password).await;
+        return finish_login(&store, pending, password).await;
     }
 
     if let Some(totp) = submitted(&cmd, "totp") {
@@ -81,7 +83,10 @@ pub async fn handle(cmd: Connect) -> Result<ConnectResponse> {
                 Some("This account uses a separate password to unlock encrypted data."),
             );
         }
-        let password = pending.login_password.clone();
+        let password = pending
+            .login_password
+            .take()
+            .context("The pending Proton login has no password; restart `caldir connect proton`")?;
         return finish_login(&store, pending, &password).await;
     }
 
@@ -192,11 +197,11 @@ fn required<'a>(cmd: &'a Connect, key: &str) -> Result<&'a str> {
 fn map_human_verification_error(error: anyhow::Error) -> anyhow::Error {
     match error.downcast_ref::<HvError>() {
         Some(HvError::Unavailable(detail)) => anyhow!(
-            "Proton requires human verification, but the verification window could not be opened ({detail}). Sign in at https://account.proton.me and retry, or install the `caldir-proton-hv` helper with `cargo install caldir-provider-proton --features hv`"
+            "Proton requires human verification, but the verification window could not be opened ({detail}). Sign in at https://account.proton.me from this network and retry, or install a build with the `hv` feature (`cargo install caldir-provider-proton --features hv`)"
         ),
-        Some(HvError::Cancelled) => anyhow!(
-            "The Proton human-verification window was closed; retry `caldir connect proton` to start again"
-        ),
+        Some(HvError::Cancelled) => {
+            anyhow!("The Proton human-verification window was closed; connect again to retry")
+        }
         Some(HvError::Failed(detail)) => anyhow!("Proton human verification failed: {detail}"),
         None => error,
     }
@@ -225,7 +230,7 @@ mod tests {
         let error = map_human_verification_error(HvError::Unavailable("no display".into()).into());
         let message = error.to_string();
         assert!(message.contains("https://account.proton.me"));
-        assert!(message.contains("caldir-proton-hv"));
+        assert!(message.contains("--features hv"));
     }
 
     #[test]

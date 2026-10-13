@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsString;
 use std::panic;
 use std::process;
 use std::time::{Duration, Instant};
@@ -38,9 +39,9 @@ enum UserEvent {
     Solved(String),
 }
 
-fn main() {
-    let mut arguments = env::args_os();
-    let _program = arguments.next();
+/// Runs the CAPTCHA window for `caldir-provider-proton --human-verification <token>`
+/// and exits with the status codes documented in `hv.rs`.
+pub fn run_from_args(mut arguments: impl Iterator<Item = OsString>) -> ! {
     let Some(token) = arguments.next() else {
         fail(2, "usage", "expected one challenge token");
     };
@@ -57,9 +58,9 @@ fn main() {
     panic::set_hook(Box::new(|info| {
         eprintln!("hv: unavailable: {info}");
     }));
-    if panic::catch_unwind(|| run(token)).is_err() {
-        process::exit(3);
-    }
+    // `run` never returns normally, so reaching this line means it panicked.
+    let _ = panic::catch_unwind(|| run(token));
+    process::exit(3);
 }
 
 #[cfg(target_os = "linux")]

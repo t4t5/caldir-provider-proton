@@ -1,0 +1,10 @@
+id = "t4t5.proton"
+name = "Proton Provider"
+description = "Sync your Proton calendars with renCal"
+min_rencal_version = "0.8.1"
+
+[[contributes.providers]]
+slug = "proton"
+name = "Proton"
+icon = "icons/proton.svg"
+bin = "caldir-provider-proton-{target}.tar.gz"
