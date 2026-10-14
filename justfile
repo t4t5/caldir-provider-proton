@@ -11,3 +11,7 @@ fmt:
 # Install provider binary to PATH
 install:
   cargo install --path . --features hv
+
+# Remove provider binary from PATH
+uninstall:
+  cargo uninstall caldir-provider-proton
