@@ -2,6 +2,10 @@
 
 A [caldir](https://caldir.org) provider for [Proton Calendar](https://proton.me/calendar)
 
+## renCal
+
+If you use [renCal](https://rencal.org), install the [Proton plugin](https://rencal.org/plugins/t4t5.proton/) instead of following the steps below.
+
 ## Install
 
 Install from crates.io:
