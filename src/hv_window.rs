@@ -1,5 +1,7 @@
+#[cfg(target_os = "linux")]
 use std::env;
 use std::ffi::OsString;
+use std::io::{self, Write};
 use std::panic;
 use std::process;
 use std::time::{Duration, Instant};
@@ -56,7 +58,7 @@ pub fn run_from_args(mut arguments: impl Iterator<Item = OsString>) -> ! {
     prepare_linux_webview();
 
     panic::set_hook(Box::new(|info| {
-        eprintln!("hv: unavailable: {info}");
+        report(&format!("hv: unavailable: {info}"));
     }));
     // `run` never returns normally, so reaching this line means it panicked.
     let _ = panic::catch_unwind(|| run(token));
@@ -143,20 +145,20 @@ fn run(token: &str) -> ! {
         *control_flow = ControlFlow::WaitUntil(deadline);
         match event {
             Event::UserEvent(UserEvent::Solved(token)) => {
-                println!("{token}");
+                let _ = writeln!(io::stdout(), "{token}");
                 *control_flow = ControlFlow::ExitWithCode(0);
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                eprintln!("hv: cancelled: verification window was closed");
+                report("hv: cancelled: verification window was closed");
                 *control_flow = ControlFlow::ExitWithCode(4);
             }
             Event::NewEvents(StartCause::ResumeTimeReached { .. })
                 if Instant::now() >= deadline =>
             {
-                eprintln!("hv: network: no verification token received within five minutes");
+                report("hv: network: no verification token received within five minutes");
                 *control_flow = ControlFlow::ExitWithCode(5);
             }
             _ => {}
@@ -165,6 +167,12 @@ fn run(token: &str) -> ! {
 }
 
 fn fail(code: i32, category: &str, detail: &str) -> ! {
-    eprintln!("hv: {category}: {detail}");
+    report(&format!("hv: {category}: {detail}"));
     process::exit(code);
+}
+
+/// Writes to stderr without panicking: the provider that started this window
+/// may have exited and closed the pipe.
+fn report(line: &str) {
+    let _ = writeln!(io::stderr(), "{line}");
 }
